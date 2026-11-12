@@ -1,0 +1,8 @@
+env-dbt/
+data/*
+!data/.gitkeep
+target/
+dbt_packages/
+logs/
+.user.yml
+.vscode

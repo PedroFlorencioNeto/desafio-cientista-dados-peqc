@@ -1,0 +1,16 @@
+version: 2
+
+data_tests:
+  - name: assert_frequencia_periodo_valido
+    description: Todo período de apuração de frequência termina na mesma data ou depois de começar.
+
+  - name: assert_frequencia_dentro_do_ano_letivo
+    description: >
+      Todo registro de frequência está dentro do ano letivo da turma do aluno.
+      Impede a mistura de anos letivos nas métricas.
+
+  - name: assert_contagens_escola_consistentes
+    description: >
+      Recalcula, de forma independente a partir do intermediate, os totais de
+      alunos, elegíveis e crônicos de cada escola e compara com o mart.
+      Protege a classificação e a agregação do indicador de absenteísmo.

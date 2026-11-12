@@ -1,206 +1,126 @@
-# Desafio Técnico - Cientista de Dados
+# Desafio de Ciência de Dados - RMI 
 
-## Registro Municipal Integrado (RMI)
+Autor: Pedro Florencio de Almeida Neto
 
----
+## Resumo
 
-## Contexto
+Este projeto transforma cinco tabelas educacionais anonimizadas do Registro Municipal Integrado em um indicador de absenteísmo crônico por escola e região. A exploração feita antes da modelagem mostrou que a frequência mínima registrada na tabela de frequência é de 97,33%. Com esse piso, nenhum aluno fica abaixo de 75%, o que pode indicar um erro da carga dos dados ou um equívoco no cálculo da métrica. A frequência usada é, então, a bimestral registrada na tabela de avaliação. Dos 57.561 alunos com dados suficientes para classificação, 4.072 (7,07%) tiveram frequência abaixo de 75% em dois ou mais bimestres. Nas 401 escolas com amostra estável, a taxa varia de 0% a 20%, com mediana de 6,9%. O projeto tem 8 models e 49 testes, e o `dbt build` termina sem erros.
 
-O **Registro Municipal Integrado (RMI)** é o data warehouse estratégico da Prefeitura do Rio de Janeiro, que consolida dados de saúde, educação, assistência social e dezenas de outros sistemas municipais. A qualidade, confiabilidade e rastreabilidade desses dados são fundamentais para políticas públicas baseadas em evidências.
+## 1. Pergunta
 
-Como Cientista de Dados, você liderará a modelagem analítica e a governança de dados que orientam decisões para milhões de cariocas. A **engenharia de analytics** — transformação, teste e documentação de dados — é a espinha dorsal da função.
+Das duas perguntas sugeridas no desafio, escolhi a do absenteísmo crônico, porque ela leva a uma ação direta: uma ordenação de escolas e regiões para priorizar acompanhamento e busca ativa. Considero absenteísta crônico o aluno com frequência abaixo de 75% em pelo menos dois bimestres. O limite de 75% é a frequência mínima exigida pela LDB (Lei 9.394/96, art. 24, VI). A exigência de dois bimestres separa um padrão persistente de um episódio isolado, como uma doença.
 
-Este desafio avalia suas habilidades em **modelagem de dados com dbt**, estratégia de testes e qualidade, SQL analítico e documentação técnica, usando dados educacionais anonimizados que simulam o contexto real do RMI.
+## 2. Diagnóstico dos dados
 
----
+Os Parquets do bucket foram carregados com `bq load` em um dataset `raw` na região US, a mesma de `datario.dados_mestres`, já que o BigQuery não executa joins entre regiões. Toda a exploração foi feita em SQL antes de qualquer model ser escrito, e os achados abaixo determinaram o desenho do projeto. Parte das consultas usadas, com os comentários que registram as decisões tomadas a partir delas, está em `eda/exploracao.sql`.
 
-## Instruções
+| Achado | Evidência | Consequência |
+|---|---|---|
+| Frequência da tabela de frequência não representa o absenteísmo | A frequência mínima de `stg_educacao__frequencia` é 97,33%, então nenhum aluno fica abaixo de 75%. | O indicador usa a frequência bimestral de `stg_educacao__avaliacao` (0 a 100, média de 89%); a coluna da tabela de frequência é mantida sem correção como `indice_frequencia_reportado` |
+| `id_turma` inconsistente entre tabelas | Em 99,99% das linhas de frequência, a turma difere da registrada no cadastro do aluno | Joins feitos por `id_aluno`, que não tem órfãos em nenhuma tabela |
+| Frequência cobre só o primeiro semestre | Mais de 96% dos alunos têm registro até 17/jul; depois, menos de 1% | Mais um motivo para usar a avaliação, que cobre os quatro bimestres |
+| Duplicatas no grão | 2.576 linhas na frequência (1.093 grupos com valores conflitantes) e 34 na avaliação | Deduplicação no staging com critério explícito |
+| Tipos diferentes do dicionário | `id_aluno` chega como BYTES e `bimestre` como STRING | `to_base64()` e `cast` no staging |
+| Descrição do desafio diferente dos dados | A frequência não é diária; `turma` é uma relação aluno–turma sem série nem turno; `escola` não tem tipo nem região | Descrições corrigidas nos YAML |
 
-1. Faça um fork do repositório do desafio para colocar a sua solução
-2. Organize o projeto seguindo as boas práticas de dbt descritas abaixo
-3. Inclua **README.md** explicando abordagem, decisões de arquitetura e como reproduzir
-4. **Entrega**: Siga as instruções de entrega enviadas por email
+## 3. Modelagem
 
----
-
-## Dados
-
-Os dados deste desafio representam registros educacionais da rede municipal, **anonimizados e aleatorizados** para fins de avaliação. Eles foram disponibilizados como arquivos Parquet em um bucket do Google Cloud Storage (GCS).
-
-### Tabelas Disponíveis
-
-| Arquivo (GCS) | Descrição | Granularidade |
-|----------------|-----------|---------------|
-| `aluno.parquet` | Cadastro de alunos (IDs anonimizados, faixa etária, bairro anonimizado) | 1 linha por aluno |
-| `escola.parquet` | Cadastro de unidades escolares (IDs anonimizados, tipo, região) | 1 linha por escola |
-| `turma.parquet` | Informações de turmas (série, turno, ano letivo) | 1 linha por turma |
-| `frequencia.parquet` | Registros de frequência escolar | 1 linha por aluno/dia |
-| `avaliacao.parquet` | Notas e avaliações por bimestre | 1 linha por aluno/disciplina/bimestre |
-
-### Tabela Auxiliar Pública
-
-| Tabela (BigQuery) | Descrição |
-|--------------------|-----------|
-| `datario.dados_mestres.bairro` | Cadastro de bairros do Rio de Janeiro |
-
-### Acesso aos dados
-
-Os arquivos Parquet estão disponíveis no bucket GCS:
+O fluxo segue as camadas staging, intermediate e marts. No diagrama, os nomes estão abreviados; os arquivos levam o prefixo da fonte (`stg_frequencia` é `stg_educacao__frequencia`, e assim por diante).
 
 ```
-https://console.cloud.google.com/storage/browser/case_vagas/rmi
+raw           staging           intermediate
+─────────────────────────────────────────────────────────────────────────
+frequencia ─► stg_frequencia ─► int_aluno_escola_atual ─┐
+avaliacao  ─► stg_avaliacao  ───────────────────────────┤
+aluno      ─► stg_aluno      ───────────────────────────┼─► int_aluno_bimestre
+escola     ─► stg_escola     ───────────────────────────┘          │
+turma      ─► stg_turma        (sem dependentes)                   ▼
+                                               marts    mart_absenteismo_escola
 ```
 
-Alternativamente, os arquivos podem ser carregados diretamente em um dataset BigQuery pessoal para uso com dbt-bigquery (veja instruções no FAQ).
+**Staging.** Há um model por tabela de origem, limitado a renomear, tipar e deduplicar. Nas duplicatas conflitantes da frequência, mantenho o menor valor, uma postura conservadora que não esconde faltas. Na avaliação, as duplicatas costumam ser um par em que uma das linhas está vazia, então fica a linha mais completa, com desempate pela menor frequência. Todo `row_number()` termina em um critério de desempate determinístico, para que duas execuções sobre os mesmos dados produzam o mesmo resultado. A avaliação ganha a flag `possui_nota`, porque 15% das linhas não têm nenhuma nota mas ainda carregam frequência. O `stg_educacao__turma` não alimenta nenhum model, já que repete o `id_turma` do cadastro de alunos. Ele existe para completar a camada e é usado em um teste singular.
 
-**⚠️ IMPORTANTE sobre os dados:**
+**Intermediate.** O `int_educacao__aluno_escola_atual` resolve a única ligação entre aluno e escola, que só existe na tabela de frequência. Como 3.483 alunos aparecem em mais de uma escola, cada um é atribuído à escola do registro mais recente, porque é a gestão atual que responde pela frequência do aluno. Os empates são resolvidos pelo maior número de registros (293 casos) e, por fim, pelo menor `id_escola` (7 casos). O `int_educacao__aluno_bimestre` tem grão aluno × bimestre e parte da avaliação com `left join` para aluno, escola atual e escola. Todas as tabelas à direita têm no máximo uma linha por chave, o que impede a multiplicação de linhas. Um eventual órfão vira nulo e é capturado pelos testes `not_null` da camada; hoje não há nenhum. Os 538 alunos que trocaram de turma dentro de um bimestre têm os dois registros combinados por média. Nesse caso os dois registros são legítimos, diferentemente das duplicatas conflitantes do staging, em que só um pode ser verdadeiro.
 
-- Os dados foram **anonimizados**: todos os identificadores pessoais (nomes, CPFs, endereços) foram removidos e substituídos por IDs sintéticos
-- Os valores numéricos foram **aleatorizados** (com preservação de distribuições e relações entre tabelas)
-- **Não tente reidentificar** registros ou cruzar com fontes externas
-- Os dados servem para avaliar sua capacidade técnica de modelagem, não para gerar insights reais sobre a rede educacional
+**Mart.** Há um único mart, o `mart_educacao__absenteismo_escola`. Ele primeiro classifica cada aluno, numa CTE interna, e depois agrega por escola. Alunos com menos de dois bimestres de frequência informada (11.941) não conseguem satisfazer a definição por construção. Por isso são tratados como "não avaliáveis", e não como não crônicos, e ficam fora do denominador da taxa. O mart guarda o numerador e o denominador, além da taxa, para que agregações por região somem contagens em vez de tirar média de taxas. Escolas com menos de 30 alunos elegíveis recebem uma flag de amostra insuficiente e ficam fora do ranking. Os três limites (75%, dois bimestres e 30 alunos) são `vars` do `dbt_project.yml`.
 
----
+**Convenções.** Os models seguem o padrão `<camada>_<fonte>__<entidade>`, e as colunas usam prefixos que indicam o conteúdo: `id_`, `hash_`, `pct_`, `nota_`, `qtd_`, `is_` e `possui_`. Staging e intermediate são views, porque a lógica é leve e assim sempre refletem o dado bruto. O mart é uma table, porque é consultado diretamente. A materialização incremental foi descartada porque o BigQuery Sandbox não permite DML, e o incremental depende de `MERGE`. A agregação por região fica versionada em `analyses/`. Usei o dbt Core 1.12, e não o dbt v2, porque o enunciado pede `dbt-core` e os pacotes da comunidade ainda têm como alvo a v1.
 
-## Parte 1: Projeto dbt e Modelagem
+## 4. Testes
 
-**Construa um projeto dbt do zero** (`dbt-core` + adapter de sua escolha) que transforme os dados brutos em camadas analíticas.
+Um teste entra no projeto quando o código depende da premissa que ele verifica, quando a violação produziria um resultado errado sem nenhum erro aparente, e sempre na camada mais próxima da origem em que o problema pode ser detectado. Seguindo esse critério, as chaves de `aluno` e `escola` são testadas como `unique` e `not_null` já nas sources e de novo no staging. Domínios usados em agrupamentos ou em expressões `CASE` recebem `accepted_values`: faixa etária, bimestre, ano letivo e código de disciplina. Este último vem acompanhado de um `not_null` no nome da disciplina, que captura um código novo que o `CASE` não reconheça. Os `relationships` verificam órfãos em frequência, avaliação e turma, e as colunas vindas de `left join` no intermediate têm `not_null`. No mart, o grão é testado com `unique`, e o ranking com um `not_null` restrito, por `where`, às escolas com amostra suficiente. Os nulos já conhecidos (68 bairros de residência e 1.713 frequências bimestrais) não são ignorados: são monitorados com `warn_if: ">0"` e com um `error_if` acima do volume atual, de modo que aparecem como aviso em toda execução e passam a falhar se o problema crescer. Ficaram de fora, de propósito, os `not_null` em colunas cujos nulos foram aceitos e a repetição de `relationships` nas camadas seguintes. A justificativa de cada teste está em comentário no próprio YAML.
 
-### 1. Configuração e Estrutura do Projeto
+As regras de negócio estão em três testes singulares em `tests/`, cada um com um cabeçalho que descreve a regra, por que ela importa e como é verificada. O primeiro garante que nenhum período de apuração termina antes de começar. O segundo garante que toda frequência cai no ano letivo da turma do aluno, com a ligação feita por `id_aluno`. O terceiro recalcula, a partir do intermediate e por um caminho independente do mart, os totais de alunos, elegíveis e crônicos de cada escola, e compara os dois com `full outer join` e `is distinct from`, o que captura também escolas ausentes de um dos lados. Há ainda um teste genérico próprio, `valor_entre`, aplicado às quatro notas (de 0 a 10), à frequência bimestral e à taxa da escola (de 0 a 100).
 
-Configure o projeto dbt com sources apontando para os dados disponibilizados. Organize os models seguindo a convenção de camadas staging → intermediate → marts.
+Os testes foram validados também por falha induzida. Rodando o teste de contagens com o limite de 80% contra um mart construído com 75%, ele acusa divergência em 481 das 521 escolas. No estado atual, os 49 testes resultam em 47 aprovações e 2 avisos intencionais.
 
-**Entregue**: Projeto dbt funcional (`dbt run` executa sem erros), com `dbt_project.yml` configurado, sources definidas e estrutura de diretórios organizada.
+## 5. Resultados
 
-### 2. Camada de Staging
+Dos 69.502 alunos com avaliação, 57.561 têm ao menos dois bimestres de frequência informada e entram no cálculo. Entre eles, 4.072 são absenteístas crônicos e 53.489 não são, o que dá uma taxa de 7,07% na rede. Os 11.941 restantes (17%) não são avaliáveis.
 
-Crie models de staging para **pelo menos 4 tabelas** fonte. Aplique limpeza, padronização de nomes, tipagem, tratamento de nulos e filtros básicos de qualidade.
+Das 521 escolas, 401 têm pelo menos 30 alunos elegíveis. Nelas, a taxa de absenteísmo crônico tem mediana de 6,9% e intervalo interquartil de 5,5% a 8,3%; a maior taxa é de 20% (6 de 30 alunos). As taxas mais altas da base, de 30%, aparecem em escolas com apenas 10 alunos elegíveis, onde três alunos bastam para chegar a esse valor, e isso justifica a flag de amostra. Por região, 106 dos 135 bairros com escola têm pelo menos 100 alunos elegíveis, e a taxa entre eles vai de 2,6% a 11,8%. A agregação regional em `analyses/absenteismo_por_regiao.sql` mostra por que a taxa precisa ser recalculada a partir das contagens: em um dos bairros, a média simples das taxas das escolas dá 5,1%, enquanto a taxa real é de 9,9%.
 
-**Entregue**: Models de staging com naming convention consistente, lógica de limpeza documentada e `schema.yml` com descrições das sources e colunas.
+A dispersão entre escolas é moderada: metade delas fica entre 5,5% e 8,3%, e as que se destacam acima disso são as candidatas naturais a acompanhamento prioritário. A flag de amostra é o que impede o ranking de ser dominado por escolas pequenas, cujas taxas extremas refletem poucos alunos e não um padrão. Os 17% de alunos não avaliáveis merecem atenção à parte, porque alunos com poucos bimestres registrados podem ser justamente os que entraram tarde ou deixaram a rede, e o indicador, por construção, não os enxerga. Por fim, os dados foram aleatorizados na anonimização. Os números demonstram o funcionamento do modelo, não um diagnóstico da rede.
 
-### 3. Camada Intermediate
+## 6. Limitações
 
-Crie **pelo menos 1 model intermediate** que combine dados de múltiplas fontes. Por exemplo: um modelo que una alunos + matrículas + frequência para calcular métricas de presença por aluno/período.
+O indicador cobre os 69.502 alunos com avaliação, e não os 97.044 do cadastro, e a cobertura da avaliação cai de 69% dos alunos no primeiro bimestre para 46% no quarto. A regra da escola atual atribui à escola nova faltas ocorridas antes da transferência. A região é um bairro anonimizado, sem nome nem vínculo com as regiões administrativas. A exigência de dois bimestres equivale a 50% dos bimestres para quem tem quatro registros e a 100% para quem tem dois, o que torna a régua mais rígida para alunos com menos dados. O grão composto do `stg_educacao__frequencia` é garantido pela deduplicação, mas não é testado diretamente, porque o projeto não usa pacotes. Por último, o BigQuery Sandbox apaga tabelas 60 dias após a criação: as tabelas de `raw` carregadas para este trabalho expiram em 9 de janeiro de 2027 e precisam ser recarregadas depois disso.
 
-**Entregue**: Model(s) intermediate com lógica de join documentada (premissas, tipo de join, tratamento de registros órfãos) e justificativa das decisões de modelagem.
+## 7. Como reproduzir
 
-### 4. Camada de Marts
+O projeto foi executado no Windows 11 com PowerShell, Python 3.12.10, dbt Core 1.12.6 e dbt-bigquery 1.12.2. É preciso ter o [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) instalado e uma conta Google com um projeto no Google Cloud. O BigQuery Sandbox é suficiente e não exige cartão de crédito.
 
-Construa **pelo menos 1 mart** orientado a responder uma pergunta analítica relevante para gestores públicos. Sugestões (ou proponha a sua):
+**Ambiente Python.** Clone o repositório e crie um ambiente virtual com Python 3.12. Versões mais novas do Python podem ainda não ser suportadas por todas as dependências do dbt. No Linux ou macOS, a ativação é `source env-dbt/bin/activate`.
 
-- **Absenteísmo crônico por região:** Quais escolas/regiões têm maior taxa de alunos com frequência abaixo de 75%?
-- **Desempenho por perfil de turma:** Como a composição das turmas (tamanho, série, turno) se correlaciona com desempenho nas avaliações?
-
-**Entregue**: Mart(s) materializados como table ou incremental, com `schema.yml` contendo descrições, e uma breve análise dos resultados (pode ser no README ou em um notebook auxiliar).
-
----
-
-## Parte 2: Testes e Qualidade de Dados
-
-**Esta é a parte mais importante do desafio.** A confiabilidade dos dados do RMI depende de uma estratégia sólida de testes.
-
-### 5. Testes Genéricos
-
-Aplique testes built-in do dbt (`unique`, `not_null`, `accepted_values`, `relationships`) nos models de staging e marts. A cobertura deve ser intencional — não basta testar tudo mecanicamente, queremos ver critério na escolha do que testar e por quê.
-
-**Entregue**: Testes configurados nos `schema.yml`, todos passando com `dbt test`. Documente brevemente por que cada teste é relevante (pode ser em comentários no YAML ou no README).
-
-### 6. Testes de Regra de Negócio
-
-Crie **pelo menos 2 testes singular ou customizados** que validem regras de negócio educacionais. Exemplos:
-
-- "Nenhum registro de frequência deve ter data anterior à data de matrícula do aluno naquela turma"
-- "Todo aluno com movimentação de tipo 'abandono' deve ter sua última frequência registrada antes da data da movimentação"
-- "A soma de presença + ausência por aluno/dia não deve ultrapassar a carga horária da turma"
-
-**Entregue**: Testes implementados (em `tests/` ou como macros), passando com `dbt test`, com documentação explicando a regra validada e por que ela importa.
-
----
-
-## Parte 3: Documentação e Análise
-
-### 8. Documentação do Projeto
-
-Produza documentação que permita a um novo membro do time entender e dar manutenção ao projeto.
-
-**Entregue**: README.md com instruções de setup e execução, diagrama ou descrição do lineage (staging → intermediate → marts), decisões de arquitetura (materializations, naming conventions, estratégia de testes), trade-offs identificados e o que faria diferente com mais tempo.
-
-### 9. Análise Exploratória (opcional, diferencial)
-
-Elabore um notebook Python complementar com uma análise exploratória dos dados que justifique suas escolhas de modelagem.
-
-**Entregue**: Notebook documentado mostrando padrões encontrados nos dados, anomalias ou problemas de qualidade identificados, e como isso influenciou suas decisões no dbt.
-
----
-
-## Avaliação
-
-Você será avaliado em cada uma das categorias abaixo:
-
-- **Modelagem e arquitetura dbt**
-- **Estratégia de testes e qualidade**
-- **SQL e lógica analítica**
-- **Documentação e comunicação**
-
-Os melhores candidatos serão chamados para a etapa de entrevistas.
-
-**Dica**: profundidade importa mais que completude. Melhor ter menos models com testes excelentes e documentação clara do que muitos models superficiais.
-
-### Diferenciais
-
-- Uso de dbt packages (`dbt_utils`, `dbt_expectations`, `codegen`)
-- Configuração de `freshness` nas sources
-- Uso de tags, hooks ou exposures
-- Testes de data contracts
-- Análise exploratória complementar (Parte 3, questão 9)
-- Configuração de CI com `dbt build` em GitHub Actions
-
----
-
-## Estrutura Sugerida do Repositório
-
-```
-desafio-rmi-ds/
-├── README.md
-├── dbt_project.yml
-├── packages.yml              # (se usar dbt packages)
-├── models/
-│   ├── staging/
-│   │   ├── stg_educacao__aluno.sql
-│   │   ├── stg_educacao__escola.sql
-│   │   ├── ...
-│   │   └── schema.yml
-│   ├── intermediate/
-│   │   ├── int_educacao__aluno_frequencia.sql
-│   │   └── schema.yml
-│   └── marts/
-│       ├── mart_educacao__absenteismo.sql
-│       └── schema.yml
-├── tests/                    # Testes singular
-├── macros/                   # Macros customizadas
-├── seeds/                    # Dados auxiliares (se aplicável)
-├── notebooks/                # (opcional) Análise exploratória
-│   └── eda.ipynb
-├── data/                     # Parquets baixados (não commitar)
-│   └── .gitkeep
-└── requirements.txt
+```powershell
+git clone https://github.com/PedroFlorencioNeto/desafio-cientista-dados-peqc.git
+cd desafio-cientista-dados-peqc
+py -V:3.12 -m venv env-dbt
+.\env-dbt\Scripts\Activate.ps1
+pip install -r requirements.txt
+dbt --version
 ```
 
----
+**Autenticação no Google Cloud.** São dois logins. O primeiro autentica as ferramentas de linha de comando (`gcloud` e `bq`). O segundo gera as Application Default Credentials, que o dbt usa por meio de `method: oauth` no `profiles.yml`, sem nenhuma chave gravada no repositório. A variável `DBT_GCP_PROJECT` diz ao dbt em qual projeto trabalhar; se não for definida, o `profiles.yml` usa `rmi-desafio`. No Linux ou macOS, use `export DBT_GCP_PROJECT=seu-projeto`.
 
-## FAQ
+```powershell
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project SEU_PROJETO
+$env:DBT_GCP_PROJECT = "SEU_PROJETO"
+```
 
-**1. Preciso usar BigQuery como warehouse?**
-Sim, BigQuery é o warehouse do projeto. Os Parquets são carregados via `bq load` para dataset raw do BigQuery Sandbox. O importante é que o projeto dbt funcione end-to-end.
+**Carga dos dados brutos.** Os arquivos do bucket não têm extensão e são baixados para `data/` já como `.parquet`. A pasta está no `.gitignore`. O dataset `raw` precisa ficar na região US. O schema de cada tabela vem do próprio Parquet.
 
-**4. Os dados estão anonimizados — posso confiar nas relações entre tabelas?**
-Sim. As chaves de relacionamento (IDs de aluno, escola, turma) foram preservadas consistentemente entre as tabelas. As distribuições estatísticas foram mantidas, mas os valores individuais foram aleatorizados.
+```powershell
+foreach ($t in "aluno","escola","turma","frequencia","avaliacao") {
+    gcloud storage cp "gs://case_vagas/rmi/$t" "data/$t.parquet"
+}
+bq --location=US mk --dataset "${env:DBT_GCP_PROJECT}:raw"
+foreach ($t in "aluno","escola","turma","frequencia","avaliacao") {
+    bq load --source_format=PARQUET "raw.$t" "data/$t.parquet"
+}
+```
 
-**5. Preciso fazer todas as partes?**
-Sim, exceto a Parte 3 questão 9 (análise exploratória), que é opcional. Mas profundidade importa mais que completude — melhor fazer menos com excelência.
+Ao final, `raw` deve ter 97.044 linhas em `aluno`, 1.558 em `escola`, 97.044 em `turma`, 2.727.684 em `frequencia` e 221.687 em `avaliacao`.
 
-**6. Posso usar dbt packages?**
-Sim, e é um diferencial! Sugestões: `dbt_utils`, `dbt_expectations`, `codegen`.
+**Execução do dbt.** O `dbt debug` confirma que o `dbt_project.yml` e o `profiles.yml` foram encontrados e que a conexão funciona. O `dbt build` cria cada model e roda os testes dele antes de seguir para os dependentes, na ordem do grafo. Se um teste falhar, o que vem depois é pulado.
 
+```powershell
+dbt debug
+dbt build
+```
 
-Boa sorte! 🚀
+A execução cria os datasets `dbt_dev_staging`, `dbt_dev_intermediate` e `dbt_dev_marts` e termina com `PASS=55 WARN=2 ERROR=0`: 8 models e 49 testes, dos quais 2 são os avisos de nulos monitorados descritos na seção 4. Para reconstruir só uma parte do grafo, use `dbt build --select +mart_educacao__absenteismo_escola`, que inclui tudo de que o mart depende. Para testar outro limite de frequência sem editar arquivos, use `dbt build --select marts --vars '{limite_frequencia_minima: 80}'`.
+
+**Documentação e análises.** O primeiro comando abaixo gera a documentação com o grafo de lineage, e o segundo a serve em `http://localhost:8080`. A consulta de `analyses/` não é executada pelo dbt, só compilada. O SQL pronto fica em `target/compiled/rmi_educacao/analyses/` e pode ser rodado no console do BigQuery.
+
+```powershell
+dbt docs generate
+dbt docs serve
+dbt compile --select absenteismo_por_regiao
+```
+
+## Declaração de uso de IA
+
+Devido ao prazo e pouca experiência com dbt, este trabalho contou com o Claude (Anthropic) na revisão do código SQL e YAML e na redação desta documentação. A escolha da pergunta, o planejamento do projeto e as decisões de modelagem e de teste são meus, entre elas o critério de deduplicação, a regra de atribuição da escola atual e a definição de absenteísmo crônico. O aprendizado da ferramenta contou com leitura de documentações e cursos rápidos no YouTube. Agradeço a oportunidade de chegar até aqui ❤️

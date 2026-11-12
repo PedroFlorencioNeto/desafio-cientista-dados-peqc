@@ -1,0 +1,42 @@
+version: 2
+sources:
+  - name: educacao                
+    schema: raw                    
+    description: >
+      Dados educacionais brutos da rede municipal, anonimizados e aleatorizados.
+      Carregados dos arquivos Parquet de gs://case_vagas/rmi com `bq load`
+      (ver README). O dbt apenas lê estas tabelas, nunca escreve nelas.
+
+    tables:
+      - name: aluno
+        description: Cadastro de alunos. 1 linha por aluno.
+        columns:
+          - name: id_aluno
+            # Premissa de todo o projeto: id_aluno é a chave de TODOS os joins.
+            # Testar no bruto aponta se o problema veio da origem ou do código.
+            data_tests:
+              - unique
+              - not_null
+
+      - name: escola
+        description: Cadastro de unidades escolares. 1 linha por escola.
+        columns:
+          - name: id_escola
+            data_tests:
+              - unique
+              - not_null
+
+      - name: turma
+        description: >
+          Apesar do nome, NÃO é um cadastro de turmas: é a relação aluno ↔ turma
+          (1 linha por aluno, colunas ano/id_turma/id_aluno) e repete a
+          informação de aluno.id_turma.
+
+      - name: frequencia
+        description: >
+          Frequência por aluno, disciplina e período de apuração (não é diária,
+          ao contrário do que diz o README do desafio). Cobertura praticamente
+          restrita a fev–jul.
+
+      - name: avaliacao
+        description: Notas por aluno e bimestre, com as 4 disciplinas em colunas.

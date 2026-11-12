@@ -1,0 +1,103 @@
+version: 2
+
+models:
+  - name: int_educacao__aluno_escola_atual
+    description: >
+      Escola atual de cada aluno. 1 linha por aluno.
+
+      **Premissa:** a única ligação aluno → escola está em stg_educacao__frequencia
+      (as demais fontes não têm id_escola). 3.483 alunos (3,6%) aparecem em mais
+      de uma escola.
+
+      **Regra:** escola do registro de frequência mais recente, pois a gestão
+      responsável pela frequência do aluno é a da escola em que ele está agora.
+      Desempates: (1) maior número de registros (293 casos), (2) menor id_escola,
+      apenas para garantir determinismo (7 casos).
+
+      **Trade-off:** as faltas de um aluno transferido são atribuídas à escola
+      nova, mesmo as ocorridas antes da transferência.
+    columns:
+      - name: id_aluno
+        description: Identificador do aluno.
+        # Garante que o desempate escolheu exatamente 1 escola por aluno. Se houver
+        # 2 linhas, o join no int_aluno_bimestre duplica as linhas do aluno.
+        data_tests:
+          - unique
+          - not_null
+
+      - name: id_escola_atual
+        description: Escola atual do aluno, segundo a regra acima.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_educacao__escola')
+                field: id_escola
+
+      - name: data_ultimo_registro
+        description: Data do último registro de frequência do aluno nessa escola.
+      - name: qtd_escolas_frequentadas
+        description: Quantidade de escolas distintas em que o aluno tem frequência.
+      - name: foi_transferido
+        description: Verdadeiro se o aluno frequentou mais de uma escola.
+
+  - name: int_educacao__aluno_bimestre
+    description: >
+      Frequência e notas por aluno e bimestre, enriquecidas com perfil do aluno e
+      escola atual. 1 linha por aluno x bimestre.
+
+      **Fonte da frequência:** stg_educacao__avaliacao.pct_frequencia, e não a
+      tabela de frequência, cujo valor não é um percentual válido e que cobre
+      apenas fev–jul (ver README).
+
+      **Agregação:** 538 alunos trocaram de turma dentro do bimestre; seus registros
+      (legítimos, não duplicados) são combinados por média.
+
+      **Joins:** LEFT JOIN a partir da avaliação, que define o grão, com aluno,
+      escola atual e escola. Todas as tabelas da direita têm no máximo 1 linha por
+      chave, o que evita multiplicar linhas. Nenhum registro é descartado: órfãos
+      geram nulos, que são detectados por testes not_null. Na exploração, 0 órfãos.
+
+      **Cobertura:** contém apenas alunos com avaliação (69.502 de 97.044).
+    columns:
+      - name: id_aluno
+        description: Identificador do aluno.
+      - name: bimestre
+        description: Bimestre (1 a 4).
+      - name: id_escola_atual
+        description: Escola atual do aluno (int_educacao__aluno_escola_atual).
+        # Rede de proteção do LEFT JOIN: aluno com avaliação mas sem escola atual
+        # ficaria fora do mart de escolas sem nenhum aviso.
+        data_tests:
+          - not_null
+
+      - name: faixa_etaria
+        description: Faixa etária do aluno.
+        # Rede de proteção do LEFT JOIN com o cadastro de alunos.
+        data_tests:
+          - not_null
+
+      - name: hash_bairro_escola
+        description: Bairro anonimizado da escola atual. Usado como "região" nos marts.
+        # Rede de proteção do LEFT JOIN com escola.
+        data_tests:
+          - not_null
+
+      - name: foi_transferido
+        description: Verdadeiro se o aluno frequentou mais de uma escola.
+      - name: pct_frequencia
+        description: Percentual de frequência no bimestre (0 a 100). Nulo se não informado.
+      - name: nota_portugues
+        description: Nota de Língua Portuguesa no bimestre.
+      - name: nota_ciencias
+        description: Nota de Ciências no bimestre.
+      - name: nota_ingles
+        description: Nota de Inglês no bimestre.
+      - name: nota_matematica
+        description: Nota de Matemática no bimestre.
+      - name: media_notas
+        description: Média das notas disponíveis (ignora disciplinas sem nota). Nulo se não houver nenhuma.
+      - name: possui_nota
+        description: Verdadeiro se ao menos uma nota estiver preenchida.
+      - name: qtd_turmas_no_bimestre
+        description: Número de turmas do aluno no bimestre (maior que 1 indica troca de turma).

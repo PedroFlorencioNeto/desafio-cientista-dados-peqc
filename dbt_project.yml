@@ -1,0 +1,29 @@
+name: rmi_educacao
+version: "1.0.0"
+profile: rmi_educacao
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+analysis-paths: ["analyses"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  rmi_educacao:        
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+    marts:
+      +materialized: table
+      +schema: marts
+vars:
+  # Frequência mínima exigida pela LDB (Lei 9.394/96, art. 24, VI) para aprovação
+  limite_frequencia_minima: 75
+  # Nº mínimo de bimestres abaixo do limite para caracterizar absenteísmo crônico
+  # (também é o nº mínimo de bimestres com dados para o aluno ser avaliável)
+  qtd_bimestres_cronico: 2
+  # Nº mínimo de alunos avaliáveis para a taxa de uma escola ser considerada estável
+  min_alunos_amostra: 30

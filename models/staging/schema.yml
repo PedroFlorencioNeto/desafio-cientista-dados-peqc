@@ -1,0 +1,222 @@
+version: 2
+
+models:
+  - name: stg_educacao__aluno
+    description: Alunos da rede municipal. 1 linha por aluno.
+    columns:
+      - name: id_aluno
+        description: Identificador anonimizado do aluno (BYTES original convertido para base64).
+        # Chave primária. Os joins de frequência e avaliação dependem de 1 linha por aluno;
+        # duplicatas aqui multiplicariam linhas em todos os models seguintes.
+        data_tests:
+          - unique
+          - not_null
+
+      - name: id_turma
+        description: Turma do aluno segundo o cadastro.
+
+      - name: faixa_etaria
+        description: Faixa etária agrupada (0-5, 6-10, 11-14, 15-17, 18+).
+        # Dimensão de análise. Uma faixa nova (ex.: "16-18") quebraria agrupamentos
+        # sem nenhum erro, então queremos ser avisados.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['0-5', '6-10', '11-14', '15-17', '18+']
+
+      - name: hash_bairro_residencia
+        description: Hash do bairro de residência. 68 nulos, mantidos.
+        # Nulos CONHECIDOS (68) e aceitos: um not_null puro falharia sempre.
+        # Monitoramos: aviso se houver nulos, erro se passar de 100 (piora relevante).
+        data_tests:
+          - not_null:
+              config:
+                warn_if: ">0"
+                error_if: ">100"
+
+  - name: stg_educacao__escola
+    description: Unidades escolares. 1 linha por escola.
+    columns:
+      - name: id_escola
+        description: Identificador anonimizado da escola.
+        # Chave primária; destino dos relationships de frequência e da escola atual.
+        data_tests:
+          - unique
+          - not_null
+
+      - name: hash_bairro_escola
+        description: >
+          Hash do bairro da escola. Não é comparável a hash_bairro_residencia
+          (sal diferente) nem ao id_bairro de datario.dados_mestres.bairro.
+
+  - name: stg_educacao__turma
+    description: Relação aluno ↔ turma. 1 linha por aluno.
+    columns:
+      - name: id_aluno
+        description: Identificador do aluno.
+        # Garante o grão documentado (1 linha por aluno). Se um aluno passar a ter
+        # várias turmas, a premissa de que esta tabela repete aluno.id_turma cai.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_educacao__aluno')
+                field: id_aluno
+
+      - name: id_turma
+        description: Turma do aluno.
+
+      - name: ano_letivo
+        description: Ano letivo anonimizado (sempre 2000).
+        # Se dados de outro ano entrarem, as métricas misturariam anos letivos.
+        # quote: false porque a coluna é numérica (sem ele, compara com o texto '2000').
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [2000]
+                quote: false
+
+  - name: stg_educacao__frequencia
+    description: >
+      Frequência por aluno, turma, disciplina e período de apuração (1 linha por
+      combinação, após deduplicação). Atenção: id_turma desta tabela não é
+      consistente com o das demais; usar id_aluno para joins.
+    columns:
+      - name: id_escola
+        description: Escola do registro. Única fonte da ligação aluno → escola.
+        # Única ponte aluno → escola do projeto. Escola inexistente = aluno
+        # atribuído a uma escola fantasma no mart.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_educacao__escola')
+                field: id_escola
+
+      - name: id_aluno
+        description: Identificador do aluno.
+        # Órfãos (Aula 4.5): frequência de aluno inexistente no cadastro.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_educacao__aluno')
+                field: id_aluno
+
+      - name: id_turma
+        description: Turma segundo esta fonte (diverge do cadastro em 99,99% dos casos).
+
+      - name: id_disciplina
+        description: Código da disciplina (disciplina_1 a disciplina_4).
+        # O CASE de nome_disciplina só conhece estes 4 códigos.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['disciplina_1', 'disciplina_2', 'disciplina_3', 'disciplina_4']
+
+      - name: nome_disciplina
+        description: Nome legível da disciplina.
+        # Par do teste acima: se surgir um código novo, o CASE cai no "else"
+        # implícito e devolve NULL. Este teste pega isso.
+        data_tests:
+          - not_null
+
+      - name: data_inicio
+        description: Início do período de apuração.
+        data_tests:
+          - not_null
+
+      - name: data_fim
+        description: Fim do período de apuração.
+        data_tests:
+          - not_null
+
+      - name: indice_frequencia_reportado
+        description: >
+          Valor original da coluna "frequencia". NÃO é um percentual: a fórmula de
+          origem (100 - faltas/dias) omitiu o fator 100, então os valores ficam
+          entre 97,3 e 100. Mantido sem correção; não usar como percentual.
+
+  - name: stg_educacao__avaliacao
+    description: Notas e frequência por aluno, turma e bimestre (1 linha por combinação, após deduplicação).
+    columns:
+      - name: id_aluno
+        description: Identificador do aluno.
+        # Órfãos: avaliação de aluno inexistente no cadastro.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_educacao__aluno')
+                field: id_aluno
+
+      - name: id_turma
+        description: Turma segundo esta fonte.
+
+      - name: bimestre
+        description: Bimestre letivo (1 a 4).
+        # Valida o cast de STRING para INT64 e o domínio. O mart conta bimestres;
+        # um "5" ou "0" distorceria a classificação de absenteísmo.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4]
+                quote: false
+
+      - name: pct_frequencia
+        description: Percentual de frequência geral do aluno no bimestre (0 a 100). Fonte usada para absenteísmo.
+        # Base do indicador principal. ~1.700 nulos conhecidos (bimestres sem
+        # frequência lançada). Erro se passar de 2.000: provável falha de carga.
+        data_tests:
+          - not_null:
+              config:
+                warn_if: ">0"
+                error_if: ">2000"
+          # Percentual: fora de 0–100 indica erro de escala na origem
+          # (como o que encontramos na tabela de frequência).
+          - valor_entre:
+              arguments:
+                minimo: 0
+                maximo: 100
+
+      - name: nota_portugues
+        description: Nota de Língua Portuguesa (0 a 10, com ruído de anonimização de ±0,2).
+        # Escala oficial de 0 a 10. O ruído de anonimização (±0,2) poderia empurrar
+        # valores para fora da escala; este teste garante que isso não aconteceu.
+        data_tests:
+          - valor_entre:
+              arguments:
+                minimo: 0
+                maximo: 10
+
+      - name: nota_ciencias
+        description: Nota de Ciências (0 a 10).
+        data_tests:
+          - valor_entre:
+              arguments:
+                minimo: 0
+                maximo: 10
+
+      - name: nota_ingles
+        description: Nota de Língua Estrangeira – Inglês (0 a 10).
+        data_tests:
+          - valor_entre:
+              arguments:
+                minimo: 0
+                maximo: 10
+
+      - name: nota_matematica
+        description: Nota de Matemática (0 a 10).
+        data_tests:
+          - valor_entre:
+              arguments:
+                minimo: 0
+                maximo: 10
+
+      - name: possui_nota
+        description: Verdadeiro se ao menos uma das 4 notas estiver preenchida.
+        data_tests:
+          - not_null

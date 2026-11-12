@@ -1,0 +1,64 @@
+version: 2
+
+models:
+  - name: mart_educacao__absenteismo_escola
+    description: >
+      Taxa de absenteísmo crônico por escola. 1 linha por escola.
+      Responde: "Quais escolas têm maior taxa de alunos com frequência abaixo de 75%?"
+
+      **Fonte da frequência:** stg_educacao__avaliacao (percentual bimestral de 0 a 100).
+      A stg_educacao__frequencia não é usada porque sua frequência mínima é 97,33%:
+      nenhum aluno ficaria abaixo de 75%.
+
+      **Definição:** absenteísta crônico = 2 ou mais bimestres com frequência abaixo
+      de 75% (limite da LDB). Alunos com menos de 2 bimestres de frequência informada
+      não são avaliáveis e ficam fora do denominador.
+
+      **Taxa** = alunos crônicos / alunos elegíveis. Alunos são atribuídos à escola
+      atual (ver int_educacao__aluno_escola_atual). O ranking considera só escolas
+      com pelo menos 30 alunos elegíveis. Limites configuráveis em dbt_project.yml (vars).
+    columns:
+      - name: id_escola
+        description: Identificador da escola.
+        # Grão do mart: 1 linha por escola.
+        data_tests:
+          - unique
+          - not_null
+
+      - name: hash_bairro_escola
+        description: Bairro anonimizado da escola ("região").
+
+      - name: qtd_alunos
+        description: Alunos com avaliação atribuídos à escola.
+
+      - name: qtd_alunos_elegiveis
+        description: Alunos com dados suficientes para classificação (denominador da taxa).
+        data_tests:
+          - not_null
+
+      - name: qtd_alunos_cronicos
+        description: Alunos classificados como absenteístas crônicos (numerador da taxa).
+
+      - name: pct_frequencia_media
+        description: Média da frequência média bimestral dos alunos da escola.
+
+      - name: taxa_absenteismo_cronico
+        description: Percentual (0 a 100) de alunos elegíveis em absenteísmo crônico.
+        # Uma taxa acima de 100% indicaria numerador maior que o denominador
+        # (crônicos contados fora dos elegíveis): erro de lógica no mart.
+        data_tests:
+          - valor_entre:
+              arguments:
+                minimo: 0
+                maximo: 100
+
+      - name: possui_amostra_suficiente
+        description: Verdadeiro se a escola tem pelo menos 30 alunos elegíveis.
+
+      - name: ranking_absenteismo
+        description: Posição da escola (1 = maior taxa), só entre as com amostra suficiente.
+        # Toda escola com amostra suficiente precisa estar no ranking.
+        data_tests:
+          - not_null:
+              config:
+                where: "possui_amostra_suficiente"
